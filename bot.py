@@ -199,10 +199,12 @@ def fetch_members(token: str) -> dict:
 def fetch_messages(token: str, start_time: str) -> list:
     """拉取指定时间之后的群消息。"""
     url = f"{BASE_URL}/im/v1/messages"
+    end_time = str(int(time.time()))
     params = {
         "container_id_type": "chat",
         "container_id": CHAT_ID,
         "start_time": start_time,
+        "end_time": end_time,
         "sort_type": "ByCreateTimeAsc",
         "page_size": 50,
     }
