@@ -2,7 +2,10 @@
 """
 飞书成单夸奖机器人 — 一次性执行脚本
 由 GitHub Actions 每 30 分钟触发一次。
-从 state.json 加载状态，拉取最近 35 分钟群消息，检测成单卡片并发送夸奖，保存状态后退出。
+从 state.json 加载状态（包含上次检查时间），拉取该时间之后的群消息，
+检测成单卡片并发送夸奖，保存状态后退出。
+
+改进：使用 last_check_time 记录上次检查时间点，避免因 cron 延迟导致漏检。
 """
 
 import json
@@ -25,8 +28,11 @@ CHAT_ID = "oc_dddb60097be21816a6cdaafbc5d9da59"
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 
-# 拉取最近 35 分钟的消息（留 5 分钟重叠防遗漏）
-LOOKBACK_SECONDS = 35 * 60
+# 首次运行或状态丢失时的默认回溯时间（6小时）
+DEFAULT_LOOKBACK_SECONDS = 6 * 60 * 60
+
+# 最大回溯时间（24小时），防止拉取太多历史消息
+MAX_LOOKBACK_SECONDS = 24 * 60 * 60
 
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 
@@ -323,13 +329,14 @@ def load_state() -> dict:
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
-            log.info("加载状态: %d 条已处理消息, %d 人话术记录",
+            log.info("加载状态: %d 条已处理消息, %d 人话术记录, last_check_time=%s",
                      len(state.get("processed_ids", [])),
-                     len(state.get("used_praise", {})))
+                     len(state.get("used_praise", {})),
+                     state.get("last_check_time", "未设置"))
             return state
         except (json.JSONDecodeError, IOError) as e:
             log.warning("加载 state.json 失败，使用空状态: %s", e)
-    return {"processed_ids": [], "used_praise": {}, "members": {}}
+    return {"processed_ids": [], "used_praise": {}, "members": {}, "last_check_time": None}
 
 
 def save_state(state: dict):
@@ -356,6 +363,7 @@ def run():
     processed_ids = set(state.get("processed_ids", []))
     used_praise = state.get("used_praise", {})  # {clean_name: [idx, ...]}
     member_map = state.get("members", {})
+    last_check_time = state.get("last_check_time")
 
     # 2. 获取 token
     token = get_tenant_token()
@@ -366,9 +374,20 @@ def run():
         log.warning("群成员为空，使用缓存")
         member_map = state.get("members", {})
 
-    # 4. 拉取最近 35 分钟的消息
-    start_ts = str(int(time.time()) - LOOKBACK_SECONDS)
-    messages = fetch_messages(token, start_ts)
+    # 4. 计算消息拉取起始时间
+    now = int(time.time())
+    if last_check_time:
+        # 从上次检查时间开始，但不超过最大回溯时间
+        start_ts = max(last_check_time, now - MAX_LOOKBACK_SECONDS)
+        log.info("从上次检查时间开始: %s (距今 %.1f 分钟)",
+                 time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_ts)),
+                 (now - start_ts) / 60)
+    else:
+        # 首次运行，使用默认回溯时间
+        start_ts = now - DEFAULT_LOOKBACK_SECONDS
+        log.info("首次运行，回溯 %.1f 小时", DEFAULT_LOOKBACK_SECONDS / 3600)
+
+    messages = fetch_messages(token, str(start_ts))
 
     # 5. 检测成单卡片并发送夸奖
     new_processed = []
@@ -422,16 +441,19 @@ def run():
 
         new_processed.append(msg_id)
 
-    # 6. 保存状态
+    # 6. 保存状态（记录本次检查时间）
     all_processed = list(processed_ids) + new_processed
     state = {
         "processed_ids": all_processed,
         "used_praise": used_praise,
         "members": member_map,
+        "last_check_time": now,  # 记录本次检查时间，下次从这里开始
     }
     save_state(state)
 
-    log.info("本次执行完毕: 检测到 %d 条新成单", len(new_processed))
+    log.info("本次执行完毕: 检测到 %d 条新成单, 下次从 %s 开始检查",
+             len(new_processed),
+             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)))
 
 
 if __name__ == "__main__":
