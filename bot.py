@@ -29,6 +29,9 @@ CHAT_ID = "oc_dddb60097be21816a6cdaafbc5d9da59"
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 
+# 管理员 open_id（接收 @机器人 消息汇总）
+ADMIN_OPEN_ID = os.environ.get("ADMIN_OPEN_ID", "ou_ab0e0fbb7083b3d10a7229627bbd467f")
+
 # 首次运行或状态丢失时的默认回溯时间（6小时）
 DEFAULT_LOOKBACK_SECONDS = 6 * 60 * 60
 
@@ -299,6 +302,164 @@ def pick_praise(clean_name: str, amount: str, used: dict) -> str:
     return template.format(name=clean_name, amount=amount)
 
 
+def get_bot_info(token: str) -> dict:
+    """获取机器人自身信息，返回 {open_id, app_name}。"""
+    resp = requests.get(
+        f"{BASE_URL}/bot/v3/info",
+        headers=auth_headers(token),
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        log.error("获取机器人信息失败: %s", data)
+        return {}
+    bot = data.get("bot", {})
+    log.info("机器人信息: %s (open_id=%s)", bot.get("app_name"), bot.get("open_id"))
+    return bot
+
+
+def detect_at_bot_messages(
+    messages: list, bot_open_id: str, processed_ids: set, member_map: dict
+) -> list[dict]:
+    """检测 @机器人 的消息。
+
+    Returns:
+        list of {msg_id, sender_name, sender_id, content, create_time}
+    """
+    at_messages = []
+
+    for msg in messages:
+        msg_id = msg.get("message_id", "")
+        if msg_id in processed_ids:
+            continue
+
+        msg_type = msg.get("msg_type", "")
+        sender = msg.get("sender", {})
+        sender_type = sender.get("sender_type", "")
+
+        # 只处理用户发送的消息
+        if sender_type != "user":
+            continue
+
+        # 检查消息内容中是否 @了机器人
+        try:
+            content_str = msg.get("body", {}).get("content", "{}")
+            content = json.loads(content_str)
+        except json.JSONDecodeError:
+            continue
+
+        # 检测 @机器人
+        has_at_bot = False
+        text_content = ""
+
+        if msg_type == "text":
+            # 文本消息格式: {"text": "@_user_1 xxx", "mentions": [{"key": "@_user_1", "id": {"open_id": "xxx"}}]}
+            text_content = content.get("text", "")
+            mentions = content.get("mentions", [])
+            for mention in mentions:
+                mention_id = mention.get("id", {})
+                if isinstance(mention_id, dict):
+                    if mention_id.get("open_id") == bot_open_id:
+                        has_at_bot = True
+                        break
+                elif mention_id == bot_open_id:
+                    has_at_bot = True
+                    break
+
+        elif msg_type == "post":
+            # 富文本消息，遍历内容查找 at 标签
+            def extract_post_content(post_content):
+                texts = []
+                at_bot = False
+                for lang_content in post_content.values():
+                    for line in lang_content.get("content", []):
+                        for elem in line:
+                            if elem.get("tag") == "text":
+                                texts.append(elem.get("text", ""))
+                            elif elem.get("tag") == "at":
+                                if elem.get("user_id") == bot_open_id:
+                                    at_bot = True
+                return " ".join(texts), at_bot
+
+            text_content, has_at_bot = extract_post_content(content)
+
+        if not has_at_bot:
+            continue
+
+        # 清理 @标记，提取纯文本
+        clean_text = re.sub(r"@_user_\d+\s*", "", text_content).strip()
+
+        # 获取发送者信息
+        sender_id = sender.get("id", "")
+        sender_name = "未知用户"
+        # 从 member_map 反查名字
+        for name, oid in member_map.items():
+            if oid == sender_id:
+                sender_name = name
+                break
+
+        # 获取消息时间
+        create_time = msg.get("create_time", "")
+        if create_time:
+            try:
+                ts = int(create_time) // 1000 if len(create_time) > 10 else int(create_time)
+                time_str = time.strftime("%H:%M", time.localtime(ts))
+            except (ValueError, OSError):
+                time_str = "未知时间"
+        else:
+            time_str = "未知时间"
+
+        at_messages.append({
+            "msg_id": msg_id,
+            "sender_name": sender_name,
+            "sender_id": sender_id,
+            "content": clean_text if clean_text else "(无文字内容)",
+            "time": time_str,
+        })
+
+        log.info("检测到 @机器人 消息: %s 说: %s", sender_name, clean_text[:50])
+
+    return at_messages
+
+
+def send_at_summary(token: str, at_messages: list[dict]):
+    """发送 @消息汇总给管理员。"""
+    if not at_messages:
+        return
+
+    if not ADMIN_OPEN_ID:
+        log.warning("未配置 ADMIN_OPEN_ID，无法发送 @消息汇总")
+        return
+
+    # 构建汇总消息
+    lines = [f"📬 收到 {len(at_messages)} 条 @消息：\n"]
+    for i, msg in enumerate(at_messages, 1):
+        lines.append(f"{i}. 【{msg['time']}】{msg['sender_name']}：")
+        lines.append(f"   {msg['content']}\n")
+
+    lines.append("\n💡 请回复对应序号+内容来回复用户")
+    lines.append("例如：1 好的，收到！")
+
+    text = "\n".join(lines)
+
+    # 发送私聊消息给管理员
+    url = f"{BASE_URL}/im/v1/messages"
+    params = {"receive_id_type": "open_id"}
+    body = {
+        "receive_id": ADMIN_OPEN_ID,
+        "msg_type": "text",
+        "content": json.dumps({"text": text}, ensure_ascii=False),
+    }
+
+    resp = requests.post(url, headers=auth_headers(token), params=params, json=body)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        log.error("发送 @消息汇总失败: %s", data)
+    else:
+        log.info("@消息汇总已发送给管理员，共 %d 条", len(at_messages))
+
+
 def send_praise(token: str, clean_name: str, open_id: str | None, praise_text: str):
     """发送夸奖消息到群聊。"""
     url = f"{BASE_URL}/im/v1/messages"
@@ -389,8 +550,10 @@ def run():
     member_map = state.get("members", {})
     last_check_time = state.get("last_check_time")
 
-    # 2. 获取 token
+    # 2. 获取 token 和机器人信息
     token = get_tenant_token()
+    bot_info = get_bot_info(token)
+    bot_open_id = bot_info.get("open_id", "")
 
     # 3. 刷新群成员（每次都刷新，因为是每 30 分钟才执行一次）
     member_map = fetch_members(token)
@@ -413,8 +576,21 @@ def run():
 
     messages = fetch_messages(token, str(start_ts))
 
-    # 5. 检测成单卡片并发送夸奖
-    new_processed = []
+    # 5. 检测 @机器人 的消息并汇总发送给管理员
+    at_messages = []
+    if bot_open_id:
+        at_messages = detect_at_bot_messages(messages, bot_open_id, processed_ids, member_map)
+        if at_messages:
+            send_at_summary(token, at_messages)
+            # 记录已处理的 @消息
+            for msg in at_messages:
+                if msg["msg_id"] not in processed_ids:
+                    processed_ids.add(msg["msg_id"])
+    else:
+        log.warning("无法获取机器人 open_id，跳过 @消息检测")
+
+    # 6. 检测成单卡片并发送夸奖
+    new_praise_processed = []
     for msg in messages:
         msg_id = msg.get("message_id", "")
         if msg_id in processed_ids:
@@ -463,10 +639,10 @@ def run():
         praise_text = pick_praise(clean_name, amount_text, used_praise)
         send_praise(token, clean_name, open_id, praise_text)
 
-        new_processed.append(msg_id)
+        new_praise_processed.append(msg_id)
 
-    # 6. 保存状态（记录本次检查时间）
-    all_processed = list(processed_ids) + new_processed
+    # 7. 保存状态（记录本次检查时间）
+    all_processed = list(processed_ids) + new_praise_processed
     state = {
         "processed_ids": all_processed,
         "used_praise": used_praise,
@@ -475,8 +651,8 @@ def run():
     }
     save_state(state)
 
-    log.info("本次执行完毕: 检测到 %d 条新成单, 下次从 %s 开始检查",
-             len(new_processed),
+    log.info("本次执行完毕: 成单 %d 条, @消息 %d 条, 下次从 %s 开始检查",
+             len(new_praise_processed), len(at_messages),
              time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)))
 
 

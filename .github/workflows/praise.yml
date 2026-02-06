@@ -33,6 +33,7 @@ jobs:
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          ADMIN_OPEN_ID: ${{ secrets.ADMIN_OPEN_ID }}
         run: python bot.py
 
       - name: Save state
