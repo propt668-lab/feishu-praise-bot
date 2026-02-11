@@ -121,39 +121,6 @@ PRAISE_WULITOU = [
     "🤷 所以 {name} 的秘诀到底是什么？{amount} 羡慕了",
 ]
 
-# 真诚暖心型 - 走心有温度
-PRAISE_ZOUXIN = [
-    "❤️ {name} 辛苦了，{amount} 这单不容易，付出大家都看在眼里",
-    "🌟 恭喜 {name}！{amount} 是对你专业和耐心最好的回报",
-    "💝 {name} 成单 {amount}，每一次成交都是用心服务的结果",
-    "🎁 为 {name} 高兴，{amount} 来之不易，你值得",
-    "🌸 {name} 的努力终于开花结果了，{amount} 恭喜",
-    "💐 一直很欣赏 {name} 的专业态度，{amount} 实至名归",
-    "🏠 {name} 又帮一个家庭做了好的选择，{amount}，有意义",
-    "😊 知道 {name} 这单跟了很久，{amount} 终于成了，替你开心",
-    "💪 {name} 成单 {amount}，靠的是实力不是运气",
-    "☺️ 看到 {name} 成单 {amount} 真的很开心，你一直很努力",
-    "🤝 {name} 又收获了客户的信任，{amount} 是最好的肯定",
-    "✨ 恭喜 {name}，{amount} 背后是无数次的用心沟通",
-    "👏 {name} 这单 {amount} 谈得漂亮，专业度拉满",
-    "🌈 为 {name} 点赞，{amount} 证明认真做事的人不会被辜负",
-    "📈 {name} 的成长大家有目共睹，{amount} 是应得的",
-    "💕 真心替 {name} 高兴，{amount}，继续保持这份热情",
-    "🌻 {name} 成单 {amount}，感谢你为团队带来的正能量",
-    "🥰 每次看到 {name} 成单都很欣慰，{amount}，越来越好了",
-    "💖 {name} 用心服务的样子真的很棒，{amount} 是最好的证明",
-    "🎯 恭喜 {name} 收获 {amount}，你的专业客户能感受到",
-    "🚀 {name} 这个月进步很大，{amount} 又一个里程碑",
-    "🌟 看好 {name}，{amount} 只是开始，后面会更好",
-    "🍀 {name} 成单 {amount}，踏实做事的人运气不会差",
-    "👐 为 {name} 的 {amount} 鼓掌，每一单都是信任的积累",
-    "💝 {name} 又帮到一个家庭了，{amount}，很有成就感吧",
-    "✨ 恭喜 {name}！{amount} 背后的努力，懂的人都懂",
-    "🌊 {name} 越来越稳了，{amount} 水到渠成",
-    "😄 看到 {name} 成单 {amount}，团队也跟着开心",
-    "👍 {name} 的认真劲儿值得学习，{amount} 恭喜",
-    "🎉 {name} 又一单 {amount}，期待你更多好消息",
-]
 
 # 浮夸蠢萌型 - 夸张到离谱，但傻乎乎很可爱，活人感拉满
 PRAISE_FUKUA = [
@@ -189,7 +156,10 @@ PRAISE_FUKUA = [
     "🤯 OH MY GOD！{name}！{amount}！买它！不对，签它！总之就是绝了！",
 ]
 
-ALL_PRAISE = PRAISE_RELIE + PRAISE_WULITOU + PRAISE_ZOUXIN + PRAISE_FUKUA  # 120 条
+# 浮夸蠢萌专属期截止日期（2026-03-03），此期间只用 PRAISE_FUKUA
+FUKUA_ONLY_UNTIL = "2026-03-03"
+
+ALL_PRAISE = PRAISE_RELIE + PRAISE_WULITOU + PRAISE_FUKUA  # 90 条
 
 
 # ---------------------------------------------------------------------------
@@ -322,17 +292,28 @@ def extract_amount(content_obj: dict) -> tuple[str, float]:
 
 
 def pick_praise(clean_name: str, amount: str, used: dict) -> str:
-    """为指定人选一条不重复的话术。"""
-    total = len(ALL_PRAISE)
+    """为指定人选一条不重复的话术。
+
+    在 FUKUA_ONLY_UNTIL 日期之前，只使用浮夸蠢萌风格；
+    之后恢复全部风格随机。
+    """
+    from datetime import date
+
+    today = date.today().isoformat()
+    if today < FUKUA_ONLY_UNTIL:
+        pool = PRAISE_FUKUA
+    else:
+        pool = ALL_PRAISE
+
+    total = len(pool)
     used_set = used.get(clean_name, [])
     available = [i for i in range(total) if i not in used_set]
     if not available:
-        # 所有话术用完，重置
         used[clean_name] = []
         available = list(range(total))
     idx = random.choice(available)
     used.setdefault(clean_name, []).append(idx)
-    template = ALL_PRAISE[idx]
+    template = pool[idx]
     return template.format(name=clean_name, amount=amount)
 
 
